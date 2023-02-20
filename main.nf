@@ -1366,10 +1366,9 @@ ch_lanemerge_groupkey
       def strandedness = it.get(7)
       def udg = it.get(8)
       def split_idx = it.get(9)
-      def size = it.get(9).size()
       def r1 = file(it.get(10))
       def r2  = file(it.get(11))
-      [ groupid, samplename, libraryid, lane, seqtype, organism, strandedness, udg, split_idx, size, r1, r2 ]
+      [ groupid, samplename, libraryid, lane, seqtype, organism, strandedness, udg, split_idx, r1, r2 ]
   }
   .set { ch_lanemerge_for_bwa }
 
@@ -1389,7 +1388,7 @@ process bwa {
     }
 
     input:
-    tuple groupid, samplename, libraryid, lane, seqtype, organism, strandedness, udg, shard_idx, size, path(r1), path(r2) from ch_lanemerge_for_bwa
+    tuple groupid, samplename, libraryid, lane, seqtype, organism, strandedness, udg, shard_idx, path(r1), path(r2) from ch_lanemerge_for_bwa
     path index from bwa_index.collect()
 
     output:
@@ -1402,7 +1401,7 @@ process bwa {
     def size = params.large_ref ? '-c' : ''
     def fasta = "${index}/${fasta_base}"
     // Name bam with index if it is sharded
-    if (params.shard_bwa && size > 1) {
+    if (params.shard_bwa) {
         output_bam = "${libraryid}_${seqtype}_${shard_idx}.mapped.bam"
     } else {
         output_bam = "${libraryid}_${seqtype}.mapped.bam"
