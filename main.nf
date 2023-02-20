@@ -220,6 +220,11 @@ if( params.bwa_index && (params.mapper == 'bwaaln' | params.mapper == 'bwamem' |
     bt2_index = Channel.empty()
 }
 
+// If not using bwaaln then set shard_bwa to false even if shard_bwa is set. 
+if (params.shard_bwa && params.mapper != 'bwaaln') {
+    params.shard_bwa = false
+}
+
 if( params.bt2_index && params.mapper == 'bowtie2' ){
     lastPath = params.bt2_index.lastIndexOf(File.separator)
     bt2_dir =  params.bt2_index.substring(0,lastPath+1)
@@ -433,6 +438,7 @@ summary['Run Name']         = workflow.runName
 summary['Input']            = params.input
 summary['Fasta Ref']        = params.fasta
 summary['Max Resources']    = "$params.max_memory memory, $params.max_cpus cpus, $params.max_time time per job"
+if (params.shard_bwa) summary['Shard Size'] = params.chunk_size
 if (workflow.containerEngine) summary['Container'] = "$workflow.containerEngine - $workflow.container"
 summary['Output dir']       = params.outdir
 summary['Launch dir']       = workflow.launchDir
@@ -1162,7 +1168,7 @@ if ( ( params.skip_collapse || params.skip_adapterremoval ) ) {
 
     }
     .mix(ch_branched_for_lanemerge_skipme)
-    .into { ch_lanemerge_for_skipmap; ch_lanemerge_for_bwa; ch_lanemerge_for_cm; ch_lanemerge_for_bwamem; ch_lanemerge_for_bt2 }
+    .into { ch_lanemerge_for_skipmap; ch_lanemerge_for_shard_bwa; ch_lanemerge_for_cm; ch_lanemerge_for_bwamem; ch_lanemerge_for_bt2 }
 } else {
   ch_lanemerge_for_mapping_r1
     .map{
@@ -1180,7 +1186,7 @@ if ( ( params.skip_collapse || params.skip_adapterremoval ) ) {
         [ samplename, libraryid, lane, seqtype, organism, strandedness, udg, r1, r2 ]
     }
     .mix(ch_branched_for_lanemerge_skipme)
-    .into { ch_lanemerge_for_skipmap; ch_lanemerge_for_bwa; ch_lanemerge_for_cm; ch_lanemerge_for_bwamem; ch_lanemerge_for_bt2 }
+    .into { ch_lanemerge_for_skipmap; ch_lanemerge_for_shard_bwa; ch_lanemerge_for_cm; ch_lanemerge_for_bwamem; ch_lanemerge_for_bt2 }
 }
 
 // ENA upload doesn't do separate lanes, so merge raw FASTQs for mapped-reads removal 
@@ -1246,6 +1252,127 @@ process fastqc_after_clipping {
 
 }
 
+// Author: Shyam
+// Use seqkit split2 to split FASTQs into 'S' seqeunces per file 
+process shardfastqs {
+    label 'mc_small'
+    tag "${libraryid}"
+
+    input:
+    tuple samplename, libraryid, lane, seqtype, organism, strandedness, udg, path(r1), path(r2) from ch_lanemerge_for_shard_bwa
+
+    output:
+    stdout into ch_output_from_shard_bwa
+
+    when:
+    params.shard_bwa
+
+    script:
+    //PE data without merging, PE data without any AR applied
+    if ( seqtype == 'PE' && ( params.skip_collapse || params.skip_adapterremoval ) ){
+    """
+    seqkit split2 -1 ${r1} -2 ${r2} -s ${params.chunk_size} -O out
+
+    # Creating R1 and R2 so they are separated by output
+    for part in \$(ls -1 out/ | rev | cut -d\\. -f3 | rev | sort | uniq ); do 
+      orgR1=\$(ls -1 out/ | grep "\$part\\." | sort | head -n1)
+      orgR2=\$(ls -1 out/ | grep "\$part\\." | sort | tail -n1)
+      newR1=\$(echo \$orgR1 | sed 's/.fq.gz/.R1.fq.gz/')
+      newR2=\$(echo \$orgR2 | sed 's/.fq.gz/.R2.fq.gz/')
+      mv out/\$orgR1 out/\$newR1
+      mv out/\$orgR2 out/\$newR2
+      echo "${samplename},${libraryid},${lane},${seqtype},${organism},${strandedness},${udg},\${num},\$PWD/out/\${R1},\$PWD/out/\$R2" 
+    done 
+    """
+    } else {
+    """
+    seqkit split2 -1 ${r1} -s ${params.chunk_size} -O out
+
+    # Creating R1 and dummy R2 so output is happy 
+    for part in \$(ls -1 out/ | rev | cut -d\\. -f3 | rev | sort | uniq ); do 
+      fastq=\$(ls -1 out/ | grep "\$part\\.")
+      num=\$(echo \$part | cut -d_ -f2)
+      R1=\$(echo \$fastq | sed 's/.fq.gz/.R1.fq.gz/')
+      R2=\$(echo \$R1 | sed 's/.R1.fq.gz/.R2.fq.gz/')
+      mv out/\${fastq} out/\${R1}
+      touch out/\${R2}
+      echo "${samplename},${libraryid},${lane},${seqtype},${organism},${strandedness},${udg},\${num},\$PWD/out/\${R1},\$PWD/out/\$R2"
+    done 
+    """
+    }
+}
+
+// Create channel with "000" shard index for no sharding and shard index for sharing
+if(!params.shard_bwa) {
+  ch_lanemerge_for_no_shared_bwa
+    .map{
+      it -> 
+        def groupid = "${it[0]}_${it[1]}_${it[3]}" // create group ID with samplename, libarayid and seqtype for unique ID for group of FASTQs 
+        def samplename = it[0]
+        def libraryid  = it[1]
+        def lane = it[2]
+        def seqtype = it[3]
+        def organism = it[4]
+        def strandedness = it[5]
+        def udg = it[6]
+        def split_idx = "000"
+        def r1 = file(it[7])
+        def r2 = file(it[8])
+
+        [ groupid, samplename, libraryid, lane, seqtype, organism, strandedness, udg, split_idx, r1, r2 ]
+    }
+    .into { ch_lanemerge_groupid_for_bwa ; ch_lanemerge_groupid_for_count }
+} else {
+  ch_output_from_shard_bwa
+    .splitCsv()
+    .map{
+      it -> 
+        def groupid = "${it[0]}_${it[1]}_${it[3]}" // create group ID with samplename, libarayid and seqtype for unique ID for group of FASTQs 
+        def samplename = it[0]
+        def libraryid  = it[1]
+        def lane = it[2]
+        def seqtype = it[3]
+        def organism = it[4]
+        def strandedness = it[5]
+        def udg = it[6]
+        def split_idx = it[7]
+        def r1 = file(it[8])
+        def r2 = file(it[9])
+
+        [ groupid, samplename, libraryid, lane, seqtype, organism, strandedness, udg, split_idx, r1, r2 ]
+    }
+    .into { ch_lanemerge_groupid_for_bwa ; ch_lanemerge_groupid_for_count }
+}
+
+// Use GroupKey to let nextflow know how many shards are expected for each 'groupid' defined above
+// This is so nextflow does not wait for all sharding alignments to finish before merging. 
+// We want nextflow to merge sample as all their shards finish aligning.  
+ch_lanemerge_groupid_for_count
+  .unique()
+  .groupTuple(by: 0)
+  .map { groupid, samplename, libraryid, lane, seqtype, organism, strandedness, udg, split_idx, r1, r2 -> tuple( groupid, groupKey(groupid, split_idx.size()) ) }
+  .set { ch_lanemerge_groupkey }
+  
+ch_lanemerge_groupkey
+  .combine(ch_lanemerge_groupid_for_bwa, by:0)
+  .map{
+    it ->
+      def groupid = it.get(1)
+      def samplename = it.get(2)
+      def libraryid = it.get(3)
+      def lane = it.get(4)
+      def seqtype = it.get(5)
+      def organism = it.get(6)
+      def strandedness = it.get(7)
+      def udg = it.get(8)
+      def split_idx = it.get(9)
+      def size = it.get(9).size()
+      def r1 = file(it.get(10))
+      def r2  = file(it.get(11))
+      [ groupid, samplename, libraryid, lane, seqtype, organism, strandedness, udg, split_idx, size, r1, r2 ]
+  }
+  .set { ch_lanemerge_for_bwa }
+
 //////////////////////////////////////////////////
 /* --    READ MAPPING AND POSTPROCESSING     -- */
 //////////////////////////////////////////////////
@@ -1255,14 +1382,18 @@ process fastqc_after_clipping {
 process bwa {
     label 'mc_medium'
     tag "${libraryid}"
-    publishDir "${params.outdir}/mapping/bwa", mode: params.publish_dir_mode
+
+    // Only publish if results are not sharded and if there is only 1 fastq 
+    if (! params.shard_bwa && size == 1) { 
+      publishDir "${params.outdir}/mapping/bwa", mode: params.publish_dir_mode
+    }
 
     input:
-    tuple samplename, libraryid, lane, seqtype, organism, strandedness, udg, path(r1), path(r2) from ch_lanemerge_for_bwa
+    tuple groupid, samplename, libraryid, lane, seqtype, organism, strandedness, udg, shard_idx, size, path(r1), path(r2) from ch_lanemerge_for_bwa
     path index from bwa_index.collect()
 
     output:
-    tuple samplename, libraryid, lane, seqtype, organism, strandedness, udg, path("*.mapped.bam"), path("*.{bai,csi}") into ch_output_from_bwa   
+    tuple groupid, samplename, libraryid, lane, seqtype, organism, strandedness, udg, path("*.mapped.bam"), path("*.{bai,csi}") into ch_output_from_bwa 
 
     when: 
     params.mapper == 'bwaaln'
@@ -1270,25 +1401,71 @@ process bwa {
     script:
     def size = params.large_ref ? '-c' : ''
     def fasta = "${index}/${fasta_base}"
-
+    // Name bam with index if it is sharded
+    if (params.shard_bwa && size > 1) {
+        output_bam = "${libraryid}_${seqtype}_${shard_idx}.mapped.bam"
+    } else {
+        output_bam = "${libraryid}_${seqtype}.mapped.bam"
+    }
     //PE data without merging, PE data without any AR applied
     if ( seqtype == 'PE' && ( params.skip_collapse || params.skip_adapterremoval ) ){
     """
     bwa aln -t ${task.cpus} $fasta ${r1} -n ${params.bwaalnn} -l ${params.bwaalnl} -k ${params.bwaalnk} -o ${params.bwaalno} -f ${libraryid}.r1.sai
     bwa aln -t ${task.cpus} $fasta ${r2} -n ${params.bwaalnn} -l ${params.bwaalnl} -k ${params.bwaalnk} -o ${params.bwaalno} -f ${libraryid}.r2.sai
-    bwa sampe -r "@RG\\tID:ILLUMINA-${libraryid}\\tSM:${samplename}\\tPL:illumina\\tPU:ILLUMINA-${libraryid}-${seqtype}" $fasta ${libraryid}.r1.sai ${libraryid}.r2.sai ${r1} ${r2} | samtools sort -@ ${task.cpus - 1} -O bam - > ${libraryid}_"${seqtype}".mapped.bam
-    samtools index "${libraryid}"_"${seqtype}".mapped.bam ${size}
+    bwa sampe -r "@RG\\tID:ILLUMINA-${libraryid}\\tSM:${samplename}\\tPL:illumina\\tPU:ILLUMINA-${libraryid}-${seqtype}" $fasta ${libraryid}.r1.sai ${libraryid}.r2.sai ${r1} ${r2} | samtools sort -@ ${task.cpus - 1} -O bam - > ${output_bam}
+    samtools index ${output_bam} ${size}
     """
     } else {
     //PE collapsed, or SE data
     """
     bwa aln -t ${task.cpus} ${fasta} ${r1} -n ${params.bwaalnn} -l ${params.bwaalnl} -k ${params.bwaalnk} -o ${params.bwaalno} -f ${libraryid}.sai
-    bwa samse -r "@RG\\tID:ILLUMINA-${libraryid}\\tSM:${samplename}\\tPL:illumina\\tPU:ILLUMINA-${libraryid}-${seqtype}" $fasta ${libraryid}.sai $r1 | samtools sort -@ ${task.cpus - 1} -O bam - > "${libraryid}"_"${seqtype}".mapped.bam
-    samtools index "${libraryid}"_"${seqtype}".mapped.bam ${size}
+    bwa samse -r "@RG\\tID:ILLUMINA-${libraryid}\\tSM:${samplename}\\tPL:illumina\\tPU:ILLUMINA-${libraryid}-${seqtype}" $fasta ${libraryid}.sai $r1 | samtools sort -@ ${task.cpus - 1} -O bam - > ${output_bam}
+    samtools index ${output_bam} ${size}
     """
     }
     
 }
+
+ch_group_after_bwa_aln = ch_output_from_bwa
+  .groupTuple()
+  .map { groupid, samplename, libraryid, lane, seqtype, organism, strandedness, udg, bam, bai -> tuple(samplename[0], libraryid[0], lane[0], seqtype[0], organism[0], strandedness[0], udg[0], bam, bai)}
+  .branch {
+    skip_merge: it[7].size() == 1 // Can skip merging if only one bam
+    merge_me: it[7].size() > 1
+  }
+
+ch_group_after_bwa_aln.merge_me.set { ch_lanemerge_for_shardmerge }
+ch_group_after_bwa_aln.skip_merge
+  .map {
+    samplename, libraryid, lane, seqtype, organism, strandedness, udg, bam, bai -> tuple(samplename, libraryid, lane, seqtype, organism, strandedness, udg, bam[0], bai[0])
+  }
+  .set { ch_lanemerge_from_bwa_skip_merge }
+
+process merge_bwa_shards {
+    label 'sc_tiny'
+    tag "${libraryid}"
+
+    publishDir "${params.outdir}/mapping/bwa", mode: params.publish_dir_mode
+    
+    input:
+    tuple samplename, libraryid, lane, seqtype, organism, strandedness, udg, path(bam), path(bam_index) from ch_lanemerge_for_shardmerge
+
+    output:
+    tuple samplename, libraryid, lane, seqtype, organism, strandedness, udg, path("*.shard_merged.mapped.bam"), path("*.shard_merged.mapped.bam.{bai,csi}") into ch_output_from_shard_merge
+
+    when:
+    params.shard_bwa
+
+    script:
+    def size = params.large_ref ? '-c' : ''
+    """
+    samtools merge ${libraryid}_${seqtype}.shard_merged.mapped.bam ${bam}
+    samtoosl index ${libraryid}_${seqtype}.shard_merged.mapped.bam
+    """ 
+}
+
+ch_lanemerge_from_bwa_skip_merge.mix(ch_output_from_shard_merge).set { ch_output_from_bwa_merge }
+
 
 // bwa mem for more complex or for modern data mapping
 
@@ -1474,7 +1651,7 @@ process bowtie2 {
 }
 
 // Gather all mapped BAMs from all possible mappers into common channels to send downstream
-ch_output_from_bwa.mix(ch_output_from_bwamem, ch_output_from_cm, ch_indexbam_for_filtering, ch_output_from_bt2)
+ch_output_from_bwa_merge.mix(ch_output_from_bwamem, ch_output_from_cm, ch_indexbam_for_filtering, ch_output_from_bt2)
   .into { ch_mapping_for_hostremovalfastq; ch_mapping_for_seqtype_merging }
 
 // Synchronise the mapped input FASTQ and input non-remapped BAM channels
