@@ -1459,7 +1459,7 @@ process merge_bwa_shards {
     def size = params.large_ref ? '-c' : ''
     """
     samtools merge ${libraryid}_${seqtype}.shard_merged.mapped.bam ${bam}
-    samtoosl index ${libraryid}_${seqtype}.shard_merged.mapped.bam
+    samtools index ${libraryid}_${seqtype}.shard_merged.mapped.bam
     """ 
 }
 
