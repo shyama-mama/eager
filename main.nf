@@ -1919,11 +1919,10 @@ process samtools_filter {
 if (params.run_bam_filtering) {
     ch_seqtypemerged_for_skipfiltering.mix(ch_output_from_filtering)
         .filter { it =~/.*filtered.bam/ }
-        .into { ch_filtering_for_skiprmdup; ch_filtering_for_dedup; ch_filtering_for_markdup; ch_filtering_for_flagstat; ch_skiprmdup_for_libeval; ch_mapped_for_preseq } 
-
+        .into { ch_filtering_for_skiprmdup; ch_shard_bam_for_dedup ; ch_bam_for_dedup ; ch_filtering_for_markdup; ch_filtering_for_flagstat; ch_skiprmdup_for_libeval; ch_mapped_for_preseq } 
 } else {
     ch_seqtypemerged_for_skipfiltering
-        .into { ch_filtering_for_skiprmdup; ch_filtering_for_dedup; ch_filtering_for_markdup; ch_filtering_for_flagstat; ch_skiprmdup_for_libeval; ch_mapped_for_preseq } 
+        .into { ch_filtering_for_skiprmdup; ch_shard_bam_for_dedup ; ch_bam_for_dedup ; ch_filtering_for_markdup; ch_filtering_for_flagstat; ch_skiprmdup_for_libeval; ch_mapped_for_preseq }
 
 }
 
@@ -1998,82 +1997,357 @@ process endorSpy {
     }
 }
 
+//
+// Shard bams by Contig before dedup
+//
+process shardbambycontig{
+    label 'mc_small'
+    tag "${libraryid}"
+
+    when:
+    !params.skip_deduplication && params.shard_deduplication
+
+    input:
+    tuple samplename, libraryid, lane, seqtype, organism, strandedness, udg, path(bam), path(bai) from ch_shard_bam_for_dedup
+
+    output:
+    stdout into ch_output_from_shard_bam_for_dedup
+
+    script:
+    if(!params.contig_file) {
+    """
+    bamtools split -in ${bam} -reference -refPrefix "contig_"
+    ls *.contig_*.bam | xargs -n1 -P5 bamtools index -in 
+
+    for sharded_bam in \$(ls -1 *.contig_*.bam ); do 
+        contig=\$(echo \$sharded_bam | grep -o .contig_.*.bam | sed 's/.contig_//' | sed 's/.bam\$//')
+        echo "${samplename},${libraryid},${lane},${seqtype},${organism},${strandedness},${udg},\${contig},\$PWD/\${sharded_bam},\$PWD/\${sharded_bam}.bai" 
+    done 
+    """
+    } else {
+    """
+    prefix=\$(basename $bam)
+    cat ${params.contig_file} | while read CONTIG ; do samtools view -o "\${prefix}.contig_\${CONTIG}.bam" -b ${bam} "\${CONTIG}"; done
+
+    for sharded_bam in \$(ls -1 *.contig_*.bam ); do 
+        contig=\$(echo \$sharded_bam | grep -o .contig_.*.bam | sed 's/.contig_//' | sed 's/.bam\$//')
+        echo "${samplename},${libraryid},${lane},${seqtype},${organism},${strandedness},${udg},\${contig},\$PWD/\${sharded_bam},\$PWD/\${sharded_bam}.bai" 
+    done 
+    """
+    }
+}
+
+if(!params.shard_deduplication) {
+
+  ch_bam_for_dedup
+    .map{
+      it -> 
+        def groupid = "${it[0]}_${it[1]}"
+        def samplename = it[0]
+        def libraryid  = it[1]
+        def lane = it[2]
+        def seqtype = it[3]
+        def organism = it[4]
+        def strandedness = it[5]
+        def udg = it[6]
+        def contig = "unsharded"
+        def bam = file(it[7])
+        def bai = file(it[8])
+
+        [ groupid, samplename, libraryid, lane, seqtype, organism, strandedness, udg, contig, bam, bai ]
+    }
+    .into { ch_sharded_contig_bam_for_markdup ; ch_sharded_contig_bam_for_count }  
+} else {
+  ch_output_from_shard_bam_for_dedup.into { ch_split_csv ; ch_count_shards }
+  ch_split_csv 
+    .splitCsv()
+    .map{
+      it -> 
+        def groupid = "${it[0]}_${it[1]}"
+        def samplename = it[0]
+        def libraryid  = it[1]
+        def lane = it[2]
+        def seqtype = it[3]
+        def organism = it[4]
+        def strandedness = it[5]
+        def udg = it[6]
+        def contig = it[7]
+        def bam = file(it[8])
+        def bai = file(it[9])
+
+        [ groupid, samplename, libraryid, lane, seqtype, organism, strandedness, udg, contig, bam, bai ]
+    }
+    .into { ch_sharded_contig_bam_for_markdup ; ch_sharded_contig_bam_for_count }
+}
+
+// Use GroupKey to let nextflow know how many shards are expected for each 'groupid' defined above
+// This is so nextflow does not wait for all dedup or markduplicate processes to finish before proceeding to next steps. 
+// This is relevent for when we shard deduplication by contig. 
+ch_sharded_contig_bam_for_count
+    .unique()
+    .groupTuple(by: 0)
+    .map { groupid, samplename, libraryid, lane, seqtype, organism, strandedness, udg, contigs, bam, bai -> tuple( groupid, groupKey(groupid, contigs.size()) ) }
+    .set { ch_bam_groupkey }
+
+ch_bam_groupkey
+    .combine(ch_sharded_contig_bam_for_markdup, by:0)
+    .map{
+      it ->
+        def groupid = it.get(1)
+        def samplename = it.get(2)
+        def libraryid = it.get(3)
+        def lane = it.get(4)
+        def seqtype = it.get(5)
+        def organism = it.get(6)
+        def strandedness = it.get(7)
+        def udg = it.get(8)
+        def contig = it.get(9)
+        def bam = file(it.get(10))
+        def bai  = file(it.get(11))
+        [ groupid, samplename, libraryid, lane, seqtype, organism, strandedness, udg, contig, bam, bai ]
+    }
+    .into { ch_filtering_for_dedup ; ch_filtering_for_markdup }
+
+
 // Post-mapping PCR amplicon removal because these lab artefacts inflate coverage statistics
 
 process dedup{
     label 'mc_small'
     tag "${libraryid}"
-    publishDir "${params.outdir}/deduplication/", mode: params.publish_dir_mode,
+    // Only publish if not sharding 
+    if (!params.shard_deduplication) {
+      publishDir "${params.outdir}/deduplication/", mode: params.publish_dir_mode,
         saveAs: {filename -> "${libraryid}/$filename"}
+    }
 
     when:
     !params.skip_deduplication && params.dedupper == 'dedup'
 
     input:
-    tuple samplename, libraryid, lane, seqtype, organism, strandedness, udg, path(bam), path(bai) from ch_filtering_for_dedup
+    tuple groupid, samplename, libraryid, lane, seqtype, organism, strandedness, udg, contig, path(bam), path(bai) from ch_filtering_for_dedup
 
     output:
-    tuple samplename, libraryid, lane, seqtype, organism, strandedness, udg, path("*.hist") into ch_hist_for_preseq
-    tuple samplename, libraryid, lane, seqtype, organism, strandedness, udg, path("*.json") into ch_dedup_results_for_multiqc
-    tuple samplename, libraryid, lane, seqtype, organism, strandedness, udg, path("${libraryid}_rmdup.bam"), path("*.{bai,csi}") into ch_output_from_dedup, ch_dedup_for_libeval
-
+    tuple groupid, samplename, libraryid, lane, seqtype, organism, strandedness, udg, path("*.hist"), path("*.json") into ch_sharded_dedupmetrics
+    tuple groupid, samplename, libraryid, lane, seqtype, organism, strandedness, udg, path("${output_bam}"), path("${output_bam}.{bai,csi}") into ch_sharded_output_from_dedup
+    
     script:
     def treat_merged = params.dedup_all_merged ? '-m' : ''
     def size = params.large_ref ? '-c' : ''
     
-    if ( bam.baseName != libraryid ) {
-    // To make sure direct BAMs have a clean name
-    """
-    mv ${bam} ${libraryid}.bam
-    dedup -Xmx${task.memory.toGiga()}g -i ${libraryid}.bam $treat_merged -o . -u 
-    mv *.log dedup.log
-    samtools sort -@ ${task.cpus} "${libraryid}"_rmdup.bam -o "${libraryid}"_rmdup.bam
-    samtools index "${libraryid}"_rmdup.bam ${size}
-    """
+    if (!params.shard_deduplication) {
+      prefix = "${libraryid}"
+      output_bam = "${prefix}_rmdup.bam"
     } else {
-    """
-    dedup -Xmx${task.memory.toGiga()}g -i ${libraryid}.bam $treat_merged -o . -u 
-    mv *.log dedup.log
-    samtools sort -@ ${task.cpus} "${libraryid}"_rmdup.bam -o "${libraryid}"_rmdup.bam
-    samtools index "${libraryid}"_rmdup.bam ${size}
-    """
+      prefix = "${libraryid}_${contig}"
+      output_bam = "${prefix}_rmdup.bam"
     }
+    """
+    [ ! -f ${prefix}.bam ] && mv ${bam} ${prefix}.bam
+    dedup -Xmx${task.memory.toGiga()}g -i ${prefix}.bam $treat_merged -o . -u 
+    mv *.log dedup.log
+    samtools sort -@ ${task.cpus} ${output_bam} -o ${output_bam}
+    samtools index ${output_bam} ${size}
+    """
 }
 
 process markduplicates{
     label 'mc_small'
     tag "${libraryid}"
-    publishDir "${params.outdir}/deduplication/", mode: params.publish_dir_mode,
+    if (!params.shard_deduplication) {
+      publishDir "${params.outdir}/deduplication/", mode: params.publish_dir_mode,
         saveAs: {filename -> "${libraryid}/$filename"}
+    }
 
     when:
     !params.skip_deduplication && params.dedupper == 'markduplicates'
 
     input:
-    tuple samplename, libraryid, lane, seqtype, organism, strandedness, udg, path(bam), path(bai) from ch_filtering_for_markdup
+    tuple groupid, samplename, libraryid, lane, seqtype, organism, strandedness, udg, contig, path(bam), path(bai) from ch_filtering_for_markdup
 
     output:
-    tuple samplename, libraryid, lane, seqtype, organism, strandedness, udg, path("*.metrics") into ch_markdup_results_for_multiqc
-    tuple samplename, libraryid, lane, seqtype, organism, strandedness, udg, path("${libraryid}_rmdup.bam"), path("*.{bai,csi}") into ch_output_from_markdup, ch_markdup_for_libeval
+    tuple groupid, samplename, libraryid, lane, seqtype, organism, strandedness, udg, path("*.metrics") into ch_sharded_markdup_results
+    tuple groupid, samplename, libraryid, lane, seqtype, organism, strandedness, udg, path("${output_bam}"), path("${output_bam}.{bai,csi}") into ch_sharded_output_from_markdup
 
     script:
     def size = params.large_ref ? '-c' : ''
-
-    if ( bam.baseName != libraryid ) {
-    // To make sure direct BAMs have a clean name
-    """
-    mv ${bam} ${libraryid}.bam
-    picard -Xmx${task.memory.toMega()}M MarkDuplicates INPUT=${libraryid}.bam OUTPUT=${libraryid}_rmdup.bam REMOVE_DUPLICATES=TRUE AS=TRUE METRICS_FILE="${libraryid}_rmdup.metrics" VALIDATION_STRINGENCY=SILENT
-    samtools index ${libraryid}_rmdup.bam ${size}
-    """
+    if (!params.shard_deduplication) {
+      prefix = "${libraryid}"
+      output_bam = "${prefix}_rmdup.bam"
     } else {
-    """
-    picard -Xmx${task.memory.toMega()}M MarkDuplicates INPUT=${libraryid}.bam OUTPUT=${libraryid}_rmdup.bam REMOVE_DUPLICATES=TRUE AS=TRUE METRICS_FILE="${libraryid}_rmdup.metrics" VALIDATION_STRINGENCY=SILENT
-    samtools index ${libraryid}_rmdup.bam ${size}
-    """
+      prefix = "${libraryid}_${contig}"
+      output_bam = "${prefix}_rmdup.bam"
     }
 
+    """
+    [ ! -f ${prefix}.bam ] && mv ${bam} ${prefix}.bam
+    picard -Xmx${task.memory.toMega()}M MarkDuplicates INPUT=${prefix}.bam OUTPUT=${output_bam} REMOVE_DUPLICATES=TRUE AS=TRUE METRICS_FILE="${prefix}_rmdup.metrics" VALIDATION_STRINGENCY=SILENT
+    samtools index ${output_bam} ${size}
+    """
 }
+
+// Group bams by groupid and check if they need to be merged 
+ch_input_for_mergedup_bams = ch_sharded_output_from_dedup.mix(ch_sharded_output_from_markdup)
+  .groupTuple()
+  .map { groupid, samplename, libraryid, lane, seqtype, organism, strandedness, udg, bam, bai -> tuple(samplename[0], libraryid[0], lane[0], seqtype[0], organism[0], strandedness[0], udg[0], bam, bai)}
+  .branch {
+    skip_merge: it[7].size() == 1 // Can skip merging if only one bam
+    merge_me: it[7].size() > 1
+  }
+
+// Group dedup hist and json by groupid and split into things that need to be merged and things that can skip merging
+ch_input_for_mergededup_metrics = ch_sharded_dedupmetrics
+  .groupTuple()
+  .map { groupid, samplename, libraryid, lane, seqtype, organism, strandedness, udg, hist, json -> tuple(samplename[0], libraryid[0], lane[0], seqtype[0], organism[0], strandedness[0], udg[0], hist, json)}
+  .branch {
+    skip_merge: it[7].size() == 1 // Can skip merging if only one metrics file
+    merge_me: it[7].size() > 1
+  }
+
+// Similarly as above for markdup metrics
+ch_input_for_mergemarkdup_metrics = ch_sharded_markdup_results
+  .groupTuple()
+  .map { groupid, samplename, libraryid, lane, seqtype, organism, strandedness, udg, metrics -> tuple(samplename[0], libraryid[0], lane[0], seqtype[0], organism[0], strandedness[0], udg[0], metrics)}
+  .branch {
+    skip_merge: it[7].size() == 1 // Can skip merging if only one metrics file
+    merge_me: it[7].size() > 1
+  }
+
+// Merge deduplicated bams if they have been split by contig
+process mergededupbams {
+    label 'sc_tiny'
+    tag "${libraryid}"
+
+    publishDir "${params.outdir}/deduplication/", mode: params.publish_dir_mode,
+        saveAs: {filename -> "${libraryid}/$filename"}
+    
+    input:
+    tuple samplename, libraryid, lane, seqtype, organism, strandedness, udg, path(bam), path(bam_index) from ch_input_for_mergedup_bams.merge_me
+
+    output:
+    tuple samplename, libraryid, lane, seqtype, organism, strandedness, udg, path("${libraryid}_rmdup.bam"), path("${libraryid}_rmdup.bam.{bai,csi}") into ch_merge_me_markdup_bams
+
+    when:
+    !params.skip_deduplication && params.shard_deduplication 
+
+    script:
+    def size = params.large_ref ? '-c' : ''
+    """
+    samtools merge ${libraryid}_rmdup.bam ${bam}
+    samtools index ${libraryid}_rmdup.bam ${size}
+    """ 
+}
+
+// Merged markduplicate metrics if they have been split by contig 
+process mergemarkdupmetrics {
+    label 'sc_tiny'
+    tag "${libraryid}"
+
+    publishDir "${params.outdir}/deduplication/", mode: params.publish_dir_mode,
+        saveAs: {filename -> "${libraryid}/$filename"}
+
+    input: 
+    tuple samplename, libraryid, lane, seqtype, organism, strandedness, udg, path(markdupmetrics) from ch_input_for_mergemarkdup_metrics.merge_me
+
+    output:
+    tuple samplename, libraryid, lane, seqtype, organism, strandedness, udg, path("output/${output_filename}") into ch_merge_me_markdup_metrics
+
+    when:
+    !params.skip_deduplication && params.shard_deduplication && params.dedupper == "markduplicates"
+
+    script:
+    output_filename = "${libraryid}_rmdup.metrics"
+    """
+    mkdir -p output
+    merge_dedup_metrics.py -d "${params.dedupper}" -l ${libraryid} -i ./ -s .metrics -o output/${output_filename}
+    """
+}
+
+// merge dedup metrics if they have been split by contig 
+process mergededupmetrics {
+    label 'sc_tiny'
+    tag "${libraryid}"
+
+    publishDir "${params.outdir}/deduplication/", mode: params.publish_dir_mode,
+        saveAs: {filename -> "${libraryid}/$filename"}
+
+    input: 
+    tuple samplename, libraryid, lane, seqtype, organism, strandedness, udg, path(hist), path(json) from ch_input_for_mergededup_metrics.merge_me
+
+    output:
+    tuple samplename, libraryid, lane, seqtype, organism, strandedness, udg, path("output/${output_hist_filename}") into ch_merge_me_dedup_histo
+    tuple samplename, libraryid, lane, seqtype, organism, strandedness, udg, path("output/${output_json_filename}") into ch_merge_me_dedup_json
+
+    when:
+    !params.skip_deduplication && params.shard_deduplication && params.dedupper == "dedup"
+
+    script:
+    output_hist_filename = "${libraryid}.hist"
+    output_json_filename = "${libraryid}_rmdup.json"
+    """
+    mkdir -p output
+    merge_dedup_metrics.py -d "${params.dedupper}" -l ${libraryid} -i ./ -s .hist -o output/${output_hist_filename}
+    merge_dedup_metrics.py -d "${params.dedupper}" -l ${libraryid} -i ./ -s .json -o output/${output_json_filename}
+    """
+}
+
+// Create a final channel of deduplicated bams 
+ch_input_for_mergedup_bams.skip_merge
+  .map {
+    samplename, libraryid, lane, seqtype, organism, strandedness, udg, bam, bai -> tuple(samplename, libraryid, lane, seqtype, organism, strandedness, udg, bam[0], bai[0])
+  }
+  .mix(ch_merge_me_markdup_bams)
+  .into { ch_deduplicated_bams ; ch_deduplicated_for_libeval ; dedup_bam }
+
+// Create a final channel of markduplicate metrics 
+
+ch_input_for_mergemarkdup_metrics.skip_merge
+  .map {
+    samplename, libraryid, lane, seqtype, organism, strandedness, udg, metrics -> tuple(samplename, libraryid, lane, seqtype, organism, strandedness, udg, metrics[0])
+  }
+  .mix(ch_merge_me_markdup_metrics)
+  .into{ ch_markdup_results_for_multiqc ; markdup}
+
+// Create a final channel for dedup histogram metrics 
+ch_input_for_mergededup_metrics.skip_merge
+  .map {
+    samplename, libraryid, lane, seqtype, organism, strandedness, udg, histo, json -> tuple(samplename, libraryid, lane, seqtype, organism, strandedness, udg, histo[0], json[0])
+  }
+  .into { ch_skip_merge_dedup_histo ; ch_skip_merge_dedup_json }
+
+ch_skip_merge_dedup_histo
+  .map {
+    it ->
+      def samplename = it[0]
+      def libraryid = it[1]
+      def lane = it[2]
+      def seqtype = it[3]
+      def organism = it[4]
+      def strandedness = it[5]
+      def udg = it[6]
+      def histo = file(it[7])
+      [ samplename, libraryid, lane, seqtype, organism, strandedness, udg, histo ]
+  }
+  .mix(ch_merge_me_dedup_histo)
+  .set{ ch_hist_for_preseq }
+
+// Create a final channel for dedup json metrics 
+ch_skip_merge_dedup_json
+  .map {
+    it ->
+      def samplename = it[0]
+      def libraryid = it[1]
+      def lane = it[2]
+      def seqtype = it[3]
+      def organism = it[4]
+      def strandedness = it[5]
+      def udg = it[6]
+      def json = file(it[8])
+      [ samplename, libraryid, lane, seqtype, organism, strandedness, udg, json ]
+  }
+  .mix(ch_merge_me_dedup_json)
+  .set{ ch_dedup_results_for_multiqc } 
+
+// Fin. 
 
 // This is for post-deduplcation per-library evaluation steps _without_ any 
 // form of library merging. 
@@ -2081,7 +2355,7 @@ if ( params.skip_deduplication ) {
   ch_skiprmdup_for_libeval.mix(ch_dedup_for_libeval, ch_markdup_for_libeval)
     .into{ ch_rmdup_for_preseq; ch_rmdup_for_damageprofiler; ch_for_nuclear_contamination; ch_rmdup_formtnucratio }
 } else {
-  ch_dedup_for_libeval.mix(ch_markdup_for_libeval)
+  ch_deduplicated_for_libeval
     .into{ ch_rmdup_for_preseq; ch_rmdup_for_damageprofiler; ch_for_nuclear_contamination; ch_rmdup_formtnucratio }
 }
 
@@ -2098,7 +2372,7 @@ if ( params.skip_deduplication ) {
       merge_me: it[7].size() > 1
     }
 } else {
-    ch_input_for_librarymerging = ch_output_from_dedup.mix(ch_output_from_markdup)
+    ch_input_for_librarymerging = ch_deduplicated_bams
     .groupTuple(by:[0,4,5,6])
     .branch{
       clean_libraryid: it[7].size() == 1
