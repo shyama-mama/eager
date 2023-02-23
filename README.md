@@ -48,23 +48,21 @@ BWA_INDEX=/hpcfs/groups/acad_users/shyrav/reference_genomes/human_homo_sapiens/h
 
 CONTIG_FILE=/hpcfs/groups/acad_users/shyrav/reference_genomes/human_homo_sapiens/hg38/data/GCF_000001405.26/GCF_000001405.26_GRCh38_genomic.contig.list
 
-
-
-nextflow run /hpcfs/groups/acad_users/shyrav/resources/eager-v2.4.5-sharding -c /hpcfs/groups/acad_users/nextflow_repos/phoenix.config -outdir ./ \
+nextflow run /hpcfs/groups/acad_users/shyrav/resources/eager-v2.4.5-sharding/ -c /hpcfs/groups/acad_users/nextflow_repos/phoenix.config \
 	-with-singularity \
 	--input ${INPUT_FILE} \
 	--fasta ${FASTA} \
 	--fasta_index ${FASTA_INDEX} \
 	--bwa_index ${BWA_INDEX} \
-    --seq_dict ${SEQ_DICT} \
+   	--seq_dict ${SEQ_DICT} \
 	--mapper 'bwaaln' \
-    --shard_bwa \
+    	--shard_bwa \
 	--bwaalnn 0.01 \
-    --bwaalno 2 \
+	--bwaalno 2 \
    	--bwaalnl 1024 \
 	--dedupper 'markduplicates' \
-    --contig_file ${CONTIG_FILE} \
-    --shard_deduplication \
+    	--contig_file ${CONTIG_FILE} \
+    	--shard_deduplication \
 	--qualitymax 64 
 
 # To exit screen 
