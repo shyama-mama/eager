@@ -2028,6 +2028,7 @@ process shardbambycontig{
     """
     prefix=\$(basename $bam)
     cat ${params.contig_file} | while read CONTIG ; do samtools view -o "\${prefix}.contig_\${CONTIG}.bam" -b ${bam} "\${CONTIG}"; done
+    ls *.contig_*.bam | xargs -n1 -P5 samtools index
 
     for sharded_bam in \$(ls -1 *.contig_*.bam ); do 
         contig=\$(echo \$sharded_bam | grep -o .contig_.*.bam | sed 's/.contig_//' | sed 's/.bam\$//')

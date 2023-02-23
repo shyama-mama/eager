@@ -50,7 +50,7 @@ CONTIG_FILE=/hpcfs/groups/acad_users/shyrav/reference_genomes/human_homo_sapiens
 
 
 
-nextflow run ${CODE_DIR}/eager/ -c phoenix.config -outdir ./ \
+nextflow run /hpcfs/groups/acad_users/shyrav/resources/eager-v2.4.5-sharding -c /hpcfs/groups/acad_users/nextflow_repos/phoenix.config -outdir ./ \
 	-with-singularity \
 	--input ${INPUT_FILE} \
 	--fasta ${FASTA} \
