@@ -1281,7 +1281,7 @@ process shardfastqs {
       newR2=\$(echo \$orgR2 | sed 's/.fq.gz/.R2.fq.gz/')
       mv out/\$orgR1 out/\$newR1
       mv out/\$orgR2 out/\$newR2
-      echo "${samplename},${libraryid},${lane},${seqtype},${organism},${strandedness},${udg},\${num},\$PWD/out/\${R1},\$PWD/out/\$R2" 
+      echo "${samplename},${libraryid},0,${seqtype},${organism},${strandedness},${udg},\${num},\$PWD/out/\${R1},\$PWD/out/\$R2" 
     done 
     """
     } else {
@@ -1296,7 +1296,7 @@ process shardfastqs {
       R2=\$(echo \$R1 | sed 's/.R1.fq.gz/.R2.fq.gz/')
       mv out/\${fastq} out/\${R1}
       touch out/\${R2}
-      echo "${samplename},${libraryid},${lane},${seqtype},${organism},${strandedness},${udg},\${num},\$PWD/out/\${R1},\$PWD/out/\$R2"
+      echo "${samplename},${libraryid},0,${seqtype},${organism},${strandedness},${udg},\${num},\$PWD/out/\${R1},\$PWD/out/\$R2"
     done 
     """
     }
