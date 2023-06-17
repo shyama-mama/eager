@@ -18,14 +18,16 @@ Running with `--shard_bwa` runs an extra process called `shardfastqs` which uses
 Post `bwa aln` the BAMs are merged using `samtools merge`
 
 ### Caveats and known issues 
-Very large samples can create thousands of shards, which when merging creates a very large BAM header. So far `qualimap`, `damageprofiler` and `mtnucratio` error with `ran out of heap size`. This can be simply fixed with reheadering the BAM file. This will be automatically implemented in future releases. 
+Very large samples can create thousands of shards, which when merging creates a very large BAM header. So far `qualimap`, `damageprofiler` and `mtnucratio` error with `ran out of heap size`. This can be simply fixed with reheadering the BAM file. I need to come up with a fix for this. Similarly, `samtools` merge can break when trying to merge a lot of bam files. Setting the `--chunk_size` to a higher value can mitigate this. 
 
 ## Details and Caveats of Deduplication sharding
 ### Details
 BAM files are split either by `bamtools split -reference`, when no `--contig_file` is provided or with `samtools view` when contigs are provided.
 
 ### Caveats and known issues.
-Using `--shard_deduplication` without `--contig_file` can be dangerous. Most reference genomes contain the main contigs, some decoy contigs and alternate contigs, leading to more than 10,000 contigs in some cases. This means there will be one deduplication job for each contig. To prevent this, it is recommended to provide a `--contig_file` with one main contig per line and alternate contigs can be ignored from the file in cases it will not be used or alternate contigs can be provided in one line space separated. Multiqc summary table has funky sample names. Aim to fix this in the next release.
+Using `--shard_deduplication` without `--contig_file` can be dangerous. Most reference genomes contain the main contigs, some decoy contigs and alternate contigs, leading to more than 10,000 contigs in some cases. This means there will be one deduplication job for each contig. To prevent this, it is recommended to provide a `--contig_file` with one main contig per line and alternate contigs can be ignored from the file in cases it will not be used or alternate contigs can be provided in one line space separated. Multiqc summary table can also have funky sample names.
+
+Honestly, I have not had a sample where sharding deduplication was necessary. It does make it faster for very large samples, but with typical ancient DNA samples you don't really have a lot of reads to dedup since unaligned reads are filtered out by this point. 
 
 # Tutorial only for Phoenix HPC and ACAD users 
 ```
