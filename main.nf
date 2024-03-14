@@ -1168,7 +1168,7 @@ if ( ( params.skip_collapse || params.skip_adapterremoval ) ) {
 
     }
     .mix(ch_branched_for_lanemerge_skipme)
-    .into { ch_lanemerge_for_skipmap; ch_lanemerge_for_shard_bwa; ch_lanemerge_for_cm; ch_lanemerge_for_bwamem; ch_lanemerge_for_bt2 }
+    .into { ch_lanemerge_for_skipmap; ch_lanemerge_for_shard_bwa; ch_lanemerge_for_no_shared_bwa ; ch_lanemerge_for_cm; ch_lanemerge_for_bwamem; ch_lanemerge_for_bt2 }
 } else {
   ch_lanemerge_for_mapping_r1
     .map{
@@ -1186,7 +1186,7 @@ if ( ( params.skip_collapse || params.skip_adapterremoval ) ) {
         [ samplename, libraryid, lane, seqtype, organism, strandedness, udg, r1, r2 ]
     }
     .mix(ch_branched_for_lanemerge_skipme)
-    .into { ch_lanemerge_for_skipmap; ch_lanemerge_for_shard_bwa; ch_lanemerge_for_cm; ch_lanemerge_for_bwamem; ch_lanemerge_for_bt2 }
+    .into { ch_lanemerge_for_skipmap; ch_lanemerge_for_shard_bwa; ch_lanemerge_for_no_shared_bwa ; ch_lanemerge_for_cm; ch_lanemerge_for_bwamem; ch_lanemerge_for_bt2 }
 }
 
 // ENA upload doesn't do separate lanes, so merge raw FASTQs for mapped-reads removal 
@@ -1277,11 +1277,12 @@ process shardfastqs {
     for part in \$(ls -1 out/ | rev | cut -d\\. -f3 | rev | sort | uniq ); do 
       orgR1=\$(ls -1 out/ | grep "\$part\\." | sort | head -n1)
       orgR2=\$(ls -1 out/ | grep "\$part\\." | sort | tail -n1)
-      newR1=\$(echo \$orgR1 | sed 's/.fq.gz/.R1.fq.gz/')
-      newR2=\$(echo \$orgR2 | sed 's/.fq.gz/.R2.fq.gz/')
+      newR1=\$(echo \$orgR1 | sed 's/.gz/.R1.fq.gz/')
+      newR2=\$(echo \$orgR2 | sed 's/.gz/.R2.fq.gz/')
+      num=\$(echo \$part | cut -d_ -f2)
       mv out/\$orgR1 out/\$newR1
       mv out/\$orgR2 out/\$newR2
-      echo "${samplename},${libraryid},0,${seqtype},${organism},${strandedness},${udg},\${num},\$PWD/out/\${R1},\$PWD/out/\$R2" 
+      echo "${samplename},${libraryid},0,${seqtype},${organism},${strandedness},${udg},\${num},\$PWD/out/\${newR1},\$PWD/out/\${newR2}" 
     done 
     """
     } else {
@@ -1292,7 +1293,7 @@ process shardfastqs {
     for part in \$(ls -1 out/ | rev | cut -d\\. -f3 | rev | sort | uniq ); do 
       fastq=\$(ls -1 out/ | grep "\$part\\.")
       num=\$(echo \$part | cut -d_ -f2)
-      R1=\$(echo \$fastq | sed 's/.fq.gz/.R1.fq.gz/')
+      R1=\$(echo \$fastq | sed 's/.gz/.R1.fq.gz/')
       R2=\$(echo \$R1 | sed 's/.R1.fq.gz/.R2.fq.gz/')
       mv out/\${fastq} out/\${R1}
       touch out/\${R2}
@@ -1383,7 +1384,7 @@ process bwa {
     tag "${libraryid}"
 
     // Only publish if results are not sharded and if there is only 1 fastq 
-    if (! params.shard_bwa && size == 1) { 
+    if (! params.shard_bwa) { 
       publishDir "${params.outdir}/mapping/bwa", mode: params.publish_dir_mode
     }
 
@@ -1458,7 +1459,7 @@ process merge_bwa_shards {
     script:
     def size = params.large_ref ? '-c' : ''
     """
-    samtools merge ${libraryid}_${seqtype}.shard_merged.mapped.bam ${bam}
+    samtools merge -c -p ${libraryid}_${seqtype}.shard_merged.mapped.bam ${bam}
     samtools index ${libraryid}_${seqtype}.shard_merged.mapped.bam
     """ 
 }
@@ -2052,8 +2053,8 @@ if(!params.shard_deduplication) {
         def strandedness = it[5]
         def udg = it[6]
         def contig = "unsharded"
-        def bam = file(it[7])
-        def bai = file(it[8])
+        def bam = it[7]
+        def bai = it[8]
 
         [ groupid, samplename, libraryid, lane, seqtype, organism, strandedness, udg, contig, bam, bai ]
     }
@@ -2073,8 +2074,8 @@ if(!params.shard_deduplication) {
         def strandedness = it[5]
         def udg = it[6]
         def contig = it[7]
-        def bam = file(it[8])
-        def bai = file(it[9])
+        def bam = it[8]
+        def bai = it[9]
 
         [ groupid, samplename, libraryid, lane, seqtype, organism, strandedness, udg, contig, bam, bai ]
     }
@@ -2103,8 +2104,8 @@ ch_bam_groupkey
         def strandedness = it.get(7)
         def udg = it.get(8)
         def contig = it.get(9)
-        def bam = file(it.get(10))
-        def bai  = file(it.get(11))
+        def bam = it.get(10)
+        def bai  = it.get(11)
         [ groupid, samplename, libraryid, lane, seqtype, organism, strandedness, udg, contig, bam, bai ]
     }
     .into { ch_filtering_for_dedup ; ch_filtering_for_markdup }
@@ -2233,7 +2234,7 @@ process mergededupbams {
     script:
     def size = params.large_ref ? '-c' : ''
     """
-    samtools merge ${libraryid}_rmdup.bam ${bam}
+    samtools merge -c -p ${libraryid}_rmdup.bam ${bam}
     samtools index ${libraryid}_rmdup.bam ${size}
     """ 
 }
