@@ -795,9 +795,38 @@ ch_output_from_fastp
   .set{ ch_fastp_for_merge }
 
 ch_skipfastp_for_merge.mix(ch_fastp_for_merge)
-  .into { ch_fastp_for_adapterremoval; ch_fastp_for_skipadapterremoval } 
+  .into { ch_fastp_for_adapterremoval; ch_fastp_for_skipadapterremoval ; ch_fastp_for_adna_trim} 
 
 // Sequencing adapter clipping and optional paired-end merging in preparation for mapping
+
+process adna_trim {
+  label 'mc_small'
+  tag "${libraryid}_L${lane}"
+  publishDir "${params.outdir}/aDNA_trim", mode: params.publish_dir_mode
+
+  input: 
+  tuple samplename, libraryid, lane, seqtype, organism, strandedness, udg, file(r1), file(r2) from ch_fastp_for_adna_trim
+
+  output:
+  tuple samplename, libraryid, lane, seqtype, organism, strandedness, udg, path("*.adna_trim.fastq.gz") into ch_output_from_adna_trim_r1
+  path("*_aDNA_trim.summary") into ch_adna_trim_summary
+
+
+  when:
+  !params.skip_adapterremoval && params.run_adna_trim
+
+  script:
+  def base = "${r1.baseName}_L${lane}"
+  """
+  seqtk mergepe $r1 $r2 | \
+    ${params.adna_trim_path} -t 16 -p ${base}_pe - | gzip - > ${base}.merged.fastq.gz
+
+  cat ${base}.merged.fastq.gz ${base}_pe.R1.fq.gz ${base}_pe.R2.fq.gz > ${base}.adna_trim.fastq.gz
+
+  cp .command.err ${base}_aDNA_trim.summary
+  """
+
+}
 
 process adapter_removal {
     label 'mc_small'
@@ -814,7 +843,7 @@ process adapter_removal {
     tuple samplename, libraryid, lane, seqtype, organism, strandedness, udg, path("output/*.settings") into ch_adapterremoval_logs
     
     when: 
-    !params.skip_adapterremoval
+    !params.skip_adapterremoval && !params.run_adna_trim
 
     script:
     def base = "${r1.baseName}_L${lane}"
@@ -971,15 +1000,44 @@ if ( params.skip_collapse ){
     .into { ch_output_from_adapterremoval; ch_adapterremoval_for_postfastqc }
 }
 
+// Make pairend things for adna trim
+if (params.run_adna_trim) {
+  ch_output_from_adna_trim_r1
+    .map{
+      it -> 
+        def samplename = it[0]
+        def libraryid  = it[1]
+        def lane = it[2]
+        def seqtype = it[3]
+        def organism = it[4]
+        def strandedness = it[5]
+        def udg = it[6]
+        def r1 = file(it[7])
+        def r2 = file("$projectDir/assets/nf-core_eager_dummy.txt")
+
+        [ samplename, libraryid, lane, seqtype, organism, strandedness, udg, r1, r2 ]
+    }
+    .into { ch_output_from_adna_trim; ch_adna_trim_for_postfastqc }
+}
+
 // AdapterRemoval bypass when not running it
 if (!params.skip_adapterremoval) {
+  if (params.run_adna_trim) {
+    ch_output_from_adna_trim.
+      into { ch_adapterremoval_for_post_ar_trimming; ch_adapterremoval_for_skip_post_ar_trimming; }
+  } else {
     ch_output_from_adapterremoval.mix(ch_fastp_for_skipadapterremoval)
         .filter { it =~/.*combined.fq.gz|.*truncated.gz/ }
         .into { ch_adapterremoval_for_post_ar_trimming; ch_adapterremoval_for_skip_post_ar_trimming; } 
+  }
 } else {
     ch_fastp_for_skipadapterremoval
         .into { ch_adapterremoval_for_post_ar_trimming; ch_adapterremoval_for_skip_post_ar_trimming; } 
 }
+
+// ch_output_from_adna_trim
+// ch_output_from_bwa_merge.mix(ch_output_from_bwamem, ch_output_from_cm, ch_indexbam_for_filtering, ch_output_from_bt2)
+//  .into { ch_mapping_for_hostremovalfastq; ch_mapping_for_seqtype_merging }
 
 // Post AR fastq trimming
 
@@ -2545,16 +2603,24 @@ process damageprofiler {
     file fasta from ch_fasta_for_damageprofiler.collect()
 
     output:
-    tuple samplename, libraryid, lane, seqtype, organism, strandedness, udg, path("${base}/*.txt") optional true
-    tuple samplename, libraryid, lane, seqtype, organism, strandedness, udg, path("${base}/*.log")
-    tuple samplename, libraryid, lane, seqtype, organism, strandedness, udg, path("${base}/*.pdf") optional true
-    tuple samplename, libraryid, lane, seqtype, organism, strandedness, udg, path("${base}/*.json") optional true into ch_damageprofiler_results
+    tuple samplename, libraryid, lane, seqtype, organism, strandedness, udg, path("${base}*/*.txt") optional true
+    tuple samplename, libraryid, lane, seqtype, organism, strandedness, udg, path("${base}*/*.log")
+    tuple samplename, libraryid, lane, seqtype, organism, strandedness, udg, path("${base}*/*.pdf") optional true
+    tuple samplename, libraryid, lane, seqtype, organism, strandedness, udg, path("${base}*/*.json") optional true into ch_damageprofiler_results
 
     script:
     base = "${bam.baseName}"
-    """
-    damageprofiler -Xmx${task.memory.toGiga()}g -i $bam -r $fasta -l ${params.damageprofiler_length} -t ${params.damageprofiler_threshold} -o . -yaxis_damageplot ${params.damageprofiler_yaxis}
-    """
+    if(params.subset_damage) {
+      """
+      samtools view -s 0.05 $bam -b > ${base}.subset.bam 
+      damageprofiler -Xmx${task.memory.toGiga()}g -i ${base}.subset.bam  -r $fasta -l ${params.damageprofiler_length} -t ${params.damageprofiler_threshold} -o . -yaxis_damageplot ${params.damageprofiler_yaxis}
+      """
+    } else {
+      """
+      damageprofiler -Xmx${task.memory.toGiga()}g -i $bam -r $fasta -l ${params.damageprofiler_length} -t ${params.damageprofiler_threshold} -o . -yaxis_damageplot ${params.damageprofiler_yaxis}
+      """
+    }
+
 }
 
 // Damage rescaling with mapDamage
