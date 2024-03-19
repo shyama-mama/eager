@@ -1320,7 +1320,8 @@ process shardfastqs {
     tuple samplename, libraryid, lane, seqtype, organism, strandedness, udg, path(r1), path(r2) from ch_lanemerge_for_shard_bwa
 
     output:
-    stdout into ch_output_from_shard_bwa
+    tuple samplename, libraryid, lane, seqtype, organism, strandedness, udg, path("out/*gz") from ch_lanemerge_for_shard_bwa
+    // stdout into ch_output_from_shard_bwa
 
     when:
     params.shard_bwa
@@ -1330,35 +1331,53 @@ process shardfastqs {
     if ( seqtype == 'PE' && ( params.skip_collapse || params.skip_adapterremoval ) ){
     """
     seqkit split2 -1 ${r1} -2 ${r2} -s ${params.chunk_size} -O out
-
-    # Creating R1 and R2 so they are separated by output
-    for part in \$(ls -1 out/ | rev | cut -d\\. -f3 | rev | sort | uniq ); do 
-      orgR1=\$(ls -1 out/ | grep "\$part\\." | sort | head -n1)
-      orgR2=\$(ls -1 out/ | grep "\$part\\." | sort | tail -n1)
-      newR1=\$(echo \$orgR1 | sed 's/.gz/.R1.fq.gz/')
-      newR2=\$(echo \$orgR2 | sed 's/.gz/.R2.fq.gz/')
-      num=\$(echo \$part | cut -d_ -f2)
-      mv out/\$orgR1 out/\$newR1
-      mv out/\$orgR2 out/\$newR2
-      echo "${samplename},${libraryid},0,${seqtype},${organism},${strandedness},${udg},\${num},\$PWD/out/\${newR1},\$PWD/out/\${newR2}" 
-    done 
     """
     } else {
     """
     seqkit split2 -1 ${r1} -s ${params.chunk_size} -O out
-
-    # Creating R1 and dummy R2 so output is happy 
-    for part in \$(ls -1 out/ | rev | cut -d\\. -f3 | rev | sort | uniq ); do 
-      fastq=\$(ls -1 out/ | grep "\$part\\.")
-      num=\$(echo \$part | cut -d_ -f2)
-      R1=\$(echo \$fastq | sed 's/.gz/.R1.fq.gz/')
-      R2=\$(echo \$R1 | sed 's/.R1.fq.gz/.R2.fq.gz/')
-      mv out/\${fastq} out/\${R1}
-      touch out/\${R2}
-      echo "${samplename},${libraryid},0,${seqtype},${organism},${strandedness},${udg},\${num},\$PWD/out/\${R1},\$PWD/out/\$R2"
-    done 
     """
     }
+}
+
+// When not collapsing paired-end data, re-merge the R1 and R2 files into single map. Otherwise if SE or collapsed PE, R2 now becomes NA
+// Sort to make sure we get consistent R1 and R2 ordered when using `-resume`, even if not needed for FastQC
+if ( params.skip_collapse ){
+  ch_output_from_adapterremoval_r1
+    .mix(ch_output_from_adapterremoval_r2)
+    .groupTuple(by: [0,1,2,3,4,5,6])
+    .map{
+      it -> 
+        def samplename = it[0]
+        def libraryid  = it[1]
+        def lane = it[2]
+        def seqtype = it[3]
+        def organism = it[4]
+        def strandedness = it[5]
+        def udg = it[6]
+        def r1 = file(it[7].sort()[0])
+        def r2 = seqtype == "PE" ? file(it[7].sort()[1]) : file("$projectDir/assets/nf-core_eager_dummy.txt")
+
+        [ samplename, libraryid, lane, seqtype, organism, strandedness, udg, r1, r2 ]
+
+    }
+    .into { ch_output_from_adapterremoval; ch_adapterremoval_for_postfastqc }
+} else {
+  ch_output_from_adapterremoval_r1
+    .map{
+      it -> 
+        def samplename = it[0]
+        def libraryid  = it[1]
+        def lane = it[2]
+        def seqtype = it[3]
+        def organism = it[4]
+        def strandedness = it[5]
+        def udg = it[6]
+        def r1 = file(it[7])
+        def r2 = file("$projectDir/assets/nf-core_eager_dummy.txt")
+
+        [ samplename, libraryid, lane, seqtype, organism, strandedness, udg, r1, r2 ]
+    }
+    .into { ch_output_from_adapterremoval; ch_adapterremoval_for_postfastqc }
 }
 
 // Create channel with "000" shard index for no sharding and shard index for sharing
@@ -1380,10 +1399,9 @@ if(!params.shard_bwa) {
 
         [ groupid, samplename, libraryid, lane, seqtype, organism, strandedness, udg, split_idx, r1, r2 ]
     }
-    .into { ch_lanemerge_groupid_for_bwa ; ch_lanemerge_groupid_for_count }
+    .into { ch_lanemerge_groupid_for_bwa ; ch_lanemerge_groupid_for_count ; print }
 } else {
   ch_output_from_shard_bwa
-    .splitCsv()
     .map{
       it -> 
         def groupid = "${it[0]}_${it[1]}_${it[3]}" // create group ID with samplename, libarayid and seqtype for unique ID for group of FASTQs 
@@ -1394,14 +1412,16 @@ if(!params.shard_bwa) {
         def organism = it[4]
         def strandedness = it[5]
         def udg = it[6]
-        def split_idx = it[7]
-        def r1 = file(it[8])
-        def r2 = file(it[9])
+        def split_idx = file(it[7]).getName().replaceAll(/.*(part_\d+).(?:fastq|fq).gz/, '$1')
+        def r1 = it[7].flatten()
+        def r2 = file("$projectDir/assets/nf-core_eager_dummy.txt")
 
         [ groupid, samplename, libraryid, lane, seqtype, organism, strandedness, udg, split_idx, r1, r2 ]
     }
-    .into { ch_lanemerge_groupid_for_bwa ; ch_lanemerge_groupid_for_count }
+    .into { ch_lanemerge_groupid_for_bwa ; ch_lanemerge_groupid_for_count ; print}
 }
+
+print.view()
 
 // Use GroupKey to let nextflow know how many shards are expected for each 'groupid' defined above
 // This is so nextflow does not wait for all sharding alignments to finish before merging. 
