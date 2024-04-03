@@ -16,4 +16,5 @@ nextflow run ronin_bwa.nf \
     --fasta_name ${FASTA_NAME} \
     --ref_s3_path ${REF_S3_PATH} \
     --bwaalnn 0.01 --bwaalno 2 --bwaalnl 1024 \
-    --bwaalnk 2 --output_s3 ${OUTPUT_S3}
+    --bwaalnk 2 --output_s3 ${OUTPUT_S3} -with-trace
+
