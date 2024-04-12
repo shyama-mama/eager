@@ -819,7 +819,11 @@ process adna_trim {
   def base = "${r1.baseName}_L${lane}"
   """
   seqtk mergepe $r1 $r2 | \
-    ${params.adna_trim_path} -t 16 -p ${base}_pe - | gzip - > ${base}.merged.fastq.gz
+    ${params.adna_trim_path} -t ${task.cpus} -p ${base}_pe - | gzip - > tmp.fq.gz
+
+  seqkit sana tmp.fq.gz -o ${base}.merged.fastq.gz
+
+  rm -f tmp.fq.gz
 
   cat ${base}.merged.fastq.gz ${base}_pe.R1.fq.gz ${base}_pe.R2.fq.gz > ${base}.adna_trim.fastq.gz
 
